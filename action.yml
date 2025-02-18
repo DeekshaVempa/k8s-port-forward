@@ -1,71 +1,46 @@
 ---
-# https://docs.github.com/en/actions/creating-actions/metadata-syntax-for-github-actions
-name: Kubernetes port-forward
-author: '@vbem'
-description: Forward local ports to a workload in Kubernetes
+name: Kubernetes port-forward (Multiple Services)
+author: '@DeekshaVempa'
+description: Forward local ports to multiple workloads in Kubernetes
 branding:
   icon: truck
   color: green
 
 inputs:
-  workload:
-    description: 'Kubernetes workload `type/name` such as `deploy/mydeploy`, `svc/mysvc` or `po/mypod`'
+  config_file:
+    description: 'Path to a JSON file with workloads and port mappings'
     required: true
-  mappings:
-    description: 'Ports mappings `[LOCAL_PORT:]REMOTE_PORT [...[LOCAL_PORT_N:]REMOTE_PORT_N]` (default as `8080:80`)'
-    required: false
-    default: '8080:80'
-  options:
-    description: 'Other command-line options, such as `--namespace=myns`'
-    required: false
-    default: ''
   sleep:
-    description: 'Seconds to wait before action finished (default as `3`)'
+    description: 'Seconds to wait before action finishes (default: 3)'
     required: false
     default: '3'
 
-# https://docs.github.com/en/actions/creating-actions/metadata-syntax-for-github-actions#outputs-for-composite-actions
 outputs:
-  pid:
-    description: 'Process ID of port-forward daemon'
-    value: ${{ steps.main.outputs.pid }}
-  log:
-    description: 'Path to port-forward log file'
-    value: ${{ steps.main.outputs.log }}
+  pids:
+    description: 'Process IDs of all port-forward daemons'
+    value: ${{ steps.main.outputs.pids }}
+  logs:
+    description: 'Paths to port-forward log files'
+    value: ${{ steps.main.outputs.logs }}
 
-# https://docs.github.com/en/actions/creating-actions/metadata-syntax-for-github-actions#runs-for-composite-actions
 runs:
   using: composite
   steps:
     - id: main
       shell: bash
       run: |
-        # implementation details
-
-        # Group stdin to stderr with title
-        # https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#grouping-log-lines
-        #   $1: group title
-        #   stdin: logs
-        #   stderr: grouped logs
-        #   $?: 0 if successful and non-zero otherwise
+        # Function to log grouped messages
         function kit::wf::group {
             echo "::group::$1"      >&2
             echo "$(< /dev/stdin)"  >&2
             echo '::endgroup::'     >&2
         }
 
-        # Set stdin as value to output of current step with given name
-        # https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#setting-an-output-parameter
-        # https://renehernandez.io/snippets/multiline-strings-as-a-job-output-in-github-actions/
-        #   $1: output name
-        #   $2: masked value in logs
-        #   stdin: output value
-        #   stderr: grouped logs
-        #   $?: 0 if successful and non-zero otherwise
+        # Function to set output variables
         function kit::wf::output {
             local val
             val="$(< /dev/stdin)"
-            { # https://www.gnu.org/software/bash/manual/bash.html#Command-Grouping
+            {
                 echo "$1<<__GITHUB_OUTPUT__"
                 echo "$val"
                 echo '__GITHUB_OUTPUT__'
@@ -73,13 +48,32 @@ runs:
             kit::wf::group "🖨️ step output '$1' has been set" <<< "${2:-$val}"
         }
 
-        PORT_FORWARD_LOG="${{ runner.temp }}/k8s-pod-forward.$RANDOM.log"
-        kit::wf::group '🚢 Run backgroup port-forward daemon' \
-          <<<"kubectl port-forward '${{ inputs.workload }}' ${{ inputs.mappings }} ${{ inputs.options }}"
-        nohup kubectl port-forward '${{ inputs.workload }}' ${{ inputs.mappings }} ${{ inputs.options }} \
-          < /dev/null &> "$PORT_FORWARD_LOG" &
-        kit::wf::output 'pid' <<< "$!"
-        kit::wf::output 'log' <<< "$PORT_FORWARD_LOG"
+        PIDS=()
+        LOGS=()
+
+        # Read and parse JSON config
+        while IFS= read -r line; do
+            workload=$(echo "$line" | jq -r '.workload')
+            mappings=$(echo "$line" | jq -r '.mappings')
+            options=$(echo "$line" | jq -r '.options // ""')
+
+            LOG_FILE="${{ runner.temp }}/k8s-pod-forward-${workload//\//-}.$RANDOM.log"
+
+            kit::wf::group "🚢 Starting port-forward for $workload" <<< "kubectl port-forward '$workload' $mappings $options"
+            nohup kubectl port-forward "$workload" $mappings $options \
+              < /dev/null &> "$LOG_FILE" &
+
+            PIDS+=("$!")
+            LOGS+=("$LOG_FILE")
+        done < <(jq -c '.[]' "${{ inputs.config_file }}")
+
+        # Store PIDs and log paths as output
+        kit::wf::output 'pids' <<< "$(IFS=,; echo "${PIDS[*]}")"
+        kit::wf::output 'logs' <<< "$(IFS=,; echo "${LOGS[*]}")"
+
         sleep '${{ inputs.sleep }}'
-        kit::wf::group '🚢 Current port-forward log' < "$PORT_FORWARD_LOG"
-...
+
+        # Display logs for all workloads
+        for log in "${LOGS[@]}"; do
+            kit::wf::group "🚢 Log for $log" < "$log"
+        done
