@@ -51,6 +51,18 @@ runs:
         PIDS=()
         LOGS=()
 
+
+        jq --version || { echo "jq is not installed!"; exit 1; }
+
+        # Check if config file exists
+        if [[ ! -f "${{ inputs.config_file }}" ]]; then
+          echo "❌ Config file '${{ inputs.config_file }}' not found!"
+          exit 1
+        fi
+
+        echo "Looking for config file at: '${{ inputs.config_file }}'"
+
+
         # Read and parse JSON config
         while IFS= read -r line; do
             workload=$(echo "$line" | jq -r '.workload')
